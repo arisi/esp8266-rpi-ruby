@@ -22,6 +22,8 @@ end
 class Esp8266
   attr_accessor :sq,:c_state
   Holdoff=0.3
+  MODE=3
+  MUX=0
 
   @@Commands={
     reboot:  {ok: "ready", tout:4000,holdoff:4},
@@ -29,15 +31,15 @@ class Esp8266
     ping:    {at: "", tout:200, period: 120, retries:4},
     reset:   {at: "+RST", ok: "ready", tout:4000, hold: 1,holdoff:5},
     cwmode?: {at: "+CWMODE?", tout:500, period: :once},
-    cwmode:  {at: "+CWMODE=", args:1, tout:500},
+    cwmode:  {at: "+CWMODE=", args:1, tout:500, ok: ["OK","no change"]},
     cipmux?: {at: "+CIPMUX?", tout:500, period: :once},
     cipmux:  {at: "+CIPMUX=", args:1, tout:500},
-    cwsap:   {at: "+CWSAP=", args:1, tout:500},
-    aplist:  {at: "+CWLAP", period: 60, tout:5000},
-    joined:  {at: "+CWLIF", period: 60, tout:5000},
-    join:    {at: "+CWJAP=", args:2, tout:500},
+    cwsap:   {at: "+CWSAP=", args:1, tout:500,modes:2},
+    aplist:  {at: "+CWLAP", period: 60, tout:5000,modes:1},
+    joined:  {at: "+CWLIF", period: 60, tout:5000,modes:2},
+    join:    {at: "+CWJAP=", args:2, tout:500,modes:1},
     unjoin:  {at: "+CWQAP", tout:500},
-    join?:   {at: "+CWJAP?", tout:500, period: 60},
+    join?:   {at: "+CWJAP?", tout:500, period: 60,modes:1},
     ip?:     {at: "+CIFSR", tout:500, period: 20},
     cips:    {at: "+CIPSTATUS", tout:500, period: 10},
     baud:    {at: "+CIOBAUD=", args:1,tout:500},
@@ -59,17 +61,25 @@ class Esp8266
 
   def cmd act
     begin
-      @holdoff=(@@Commands[act[:cmd]][:holdoff]||Holdoff)*1000.0
-      puts "act:#{act} --> #{@holdoff}"
+      @holdoff=(@@Commands[act[:cmd]][:holdoff]||Holdoff)*1000.0 if @@Commands[act[:cmd]]
       if act[:cmd]==:send #for raw send , debug console etc.
         puts "Debug: sent '#{act[:str]}'".colorize(:yellow)
         @port.write "#{act[:str]}\r\n"
+      elsif act[:cmd]==:aps
+        @ap_list.each_with_index do |data,i|
+          printf "%2d: %s\n",i,"#{data}"
+        end
       elsif act[:cmd]==:init
         puts "\nDebug: Init --------------------------------------------".colorize(:blue)
         newc_state :idle
         @port.write "\r\n" #flush any crap on serial line
         @c_stamps[act[:cmd]]=stamp+10000.0
       elsif @@Commands[act[:cmd]]
+        modes=@@Commands[act[:cmd]][:modes]||3
+        if (@cwmode & modes == 0)
+          @c_stamps[act[:cmd]]=stamp+10000.0
+          return
+        end
         newc_state :incmd
         str=""
         if @@Commands[act[:cmd]][:at]
@@ -92,7 +102,7 @@ class Esp8266
         @c_callback=@@Commands[act[:cmd]][:callback]
         @c_ok=@@Commands[act[:cmd]][:ok]||"OK"
         @c_error=@@Commands[act[:cmd]][:error]||"ERROR"
-        puts "cmd #{act} -> <#{str}>  ok: #{@c_ok} tout:#{@c_tout}".colorize(:blue).bold
+        puts "\ncmd #{act} -> <#{str}>  ok: #{@c_ok} tout:#{@c_tout}".colorize(:blue).bold
         @port.write "#{str}\r\n" if str!=""
       else
         puts "Error: Unsupported command: #{act}"
@@ -115,24 +125,21 @@ class Esp8266
     @c_reply=[]
   end
 
-MODE=1
   def cb_cwmode?
     #+CWMODE:1
     if @c_reply[0][/\+CWMODE:(\d+)/]
       @cwmode=$1.to_i
-      puts "MOOOOOOOOOOOOOOOOOOOOOODE #{$1}"
       if @cwmode!=MODE
         sq << {cmd: :cwmode, args:"#{MODE}"}
         sq << {cmd: :cwmode?}
       end
     end
   end
-MUX=0
+
   def cb_cipmux?
     #+CWMODE:1
     if @c_reply[0][/\+CIPMUX:(\d+)/]
       @cipmux=$1.to_i
-      puts "CIPMUX MOOOOOOOOOOOOOOOOOOOOOODE #{$1}"
       if @cipmux!=MUX
         sq << {cmd: :cipmux, args:"#{MUX}"}
         sq << {cmd: :cipmux?}
@@ -164,30 +171,47 @@ MUX=0
 #AT+CIPSTART="UDP","20.20.20.21",8099
   def cb_aplist #we have completed an command and got this as reply:
     @c_reply.each do |ap|
-      puts "ap: #{ap}"
       if ap[/\+CWLAP:\((.+)\)/]
-        puts "app: #{$1}"
         f=CSV.parse($1)
         if f[0]
           data=f[0]
-          @ap_list[data[1]]={
-            security: data[0].to_i,
-            signal: data[2].to_i,
-            mac: data[3],
-            channel: data[4].to_i,
-            stamp: stamp,
-          }
+          ssid=data[1]
+          obj={
+              security: data[0].to_i,
+              ssid: ssid,
+              signal: data[2].to_i,
+              mac: data[3],
+              channel: data[4].to_i,
+              stamp: stamp,
+            }
+          done=false
+          @ap_list.each_with_index do |ap,i|
+            if ap[:ssid]==ssid
+              @ap_list[i]=@ap_list[i].merge obj
+              @ap_list[i][:found_count]+=1
+              done=true
+            end
+          end
+          if not done
+            @ap_list<<obj.merge({
+              join_last: 0.0,
+              join_last_error: nil,
+              join_count: 0,
+              join_secs: 0,
+              found_count: 1,
+              })
+          end
         end
       end
     end
-    pp @ap_list
+    #pp @ap_list
   end
 
 
   def parse_reply s
     now=stamp
     if @c_state==:incmd
-      if s==@c_ok
+      if (@c_ok.is_a? String and s==@c_ok) or (@c_ok.include? s)
         cb="cb_#{@c_last[:cmd]}".to_sym
         puts ">Ok detected! #{@c_last}, took  #{now-@c_state_s}ms , tout #{@c_tout}ms cb:#{cb}".colorize(:green)
         if @c_reply[0]==@c_at
@@ -228,11 +252,12 @@ MUX=0
     @c_stamps={}
     @holdoff=Holdoff
 
-    @ap_list={}
+    @ap_list=[]
     @sq=Queue.new
     @sq << {cmd: :reboot}
     @sq << {cmd: :init}
     @sq << {cmd: :ping}
+    @sq << {cmd: :cwmode, args:"#{MODE}"}
     #@sq << {cmd: :baud, args: "9600"}
     @sq << {cmd: :ping}
     @sq << {cmd: :ping}
@@ -286,7 +311,6 @@ MUX=0
                   end
                 elsif d[:period]
                   if not @c_stamps[c] or now-@c_stamps[c]>d[:period]*1000
-                    puts "Debug: periodical #{c}"
                     runit=true
                   end
                 end
@@ -362,8 +386,11 @@ loop  do
   if $stdin.ready?
     c = $stdin.gets.chop
     puts "got #{c} , #{$dev.c_state}"
-    if c[0]==":"
-      $dev.sq << {cmd: c[1..-1].to_sym}
+    if c[/^\:(.+) (.+)$/]
+      puts "<#{$1}> <#{$2}>"
+      $dev.sq << {cmd: $1.to_sym, args: $2}
+    elsif c[/^\:(.+)$/]
+      $dev.sq << {cmd: $1.to_sym, args: $2}
     else
       $dev.sq << {cmd: :send, str:c}
     end
