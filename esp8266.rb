@@ -34,15 +34,17 @@ class Esp8266
     cwmode:  {at: "+CWMODE=", args:1, tout:500, ok: ["OK","no change"]},
     cipmux?: {at: "+CIPMUX?", tout:500, period: :once},
     cipmux:  {at: "+CIPMUX=", args:1, tout:500},
-    cwsap:   {at: "+CWSAP=", args:1, tout:500,modes:2},
-    aplist:  {at: "+CWLAP", period: 60, tout:5000,modes:1},
-    joined:  {at: "+CWLIF", period: 60, tout:5000,modes:2},
-    join:    {at: "+CWJAP=", args:2, tout:500,modes:1},
+    cwsap:   {at: "+CWSAP=", args:1, tout:500, modes:2},
+    aplist:  {at: "+CWLAP", period: 60, tout:5000, modes:1},
+    joined:  {at: "+CWLIF", period: 60, tout:5000, modes:2},
+    join:    {at: "+CWJAP=", args:2, tout:5000, modes:1},
     unjoin:  {at: "+CWQAP", tout:500},
-    join?:   {at: "+CWJAP?", tout:500, period: 60,modes:1},
+    join?:   {at: "+CWJAP?", tout:500, period: 60, modes:1},
     ip?:     {at: "+CIFSR", tout:500, period: 20},
     cips:    {at: "+CIPSTATUS", tout:500, period: 10},
-    baud:    {at: "+CIOBAUD=", args:1,tout:500},
+    connect: {at: "+CIPSTART=", args: 1, tout:2000, modes:1},
+    send:    {at: "+CIPSEND=", args: 1, has_data:true, tout:2000, modes:1, ok: "SEND OK"},
+    baud:    {at: "+CIOBAUD=", args: 1, tout:500},
   }
 
   def stamp
@@ -62,7 +64,7 @@ class Esp8266
   def cmd act
     begin
       @holdoff=(@@Commands[act[:cmd]][:holdoff]||Holdoff)*1000.0 if @@Commands[act[:cmd]]
-      if act[:cmd]==:send #for raw send , debug console etc.
+      if act[:cmd]==:raw #for raw send , debug console etc.
         puts "Debug: sent '#{act[:str]}'".colorize(:yellow)
         @port.write "#{act[:str]}\r\n"
       elsif act[:cmd]==:aps
@@ -85,7 +87,13 @@ class Esp8266
         if @@Commands[act[:cmd]][:at]
           str="AT#{@@Commands[act[:cmd]][:at]}"
           if @@Commands[act[:cmd]][:args]
-            str+=act[:args]
+            if @@Commands[act[:cmd]][:has_data]
+              act[:args]+="\n" #nice on nc
+              str+=act[:args].length.to_s
+              @sendbuf=act[:args]
+            else
+              str+=act[:args]
+            end
           end
 
         end
@@ -167,7 +175,17 @@ class Esp8266
     else
       puts "cippi: #{@c_reply} ???"
     end
+    #+CIPSTATUS:0,"UDP","20.20.20.21",8099,0
+    if @c_reply[1] and @c_reply[1][/\+CIPSTATUS:(\d+),"(.+)","(.+)",(\d+),(\d+)/]
+      puts "Connection: #{$1},#{$2},#{$3},#{$4},#{$5}"
+    else
+      puts "NO CONNECTION -- LET'S CONNECT!"
+      sq << {cmd: :connect, args:"\"UDP\",\"20.20.20.21\",8099"}
+      sq << {cmd: :cips}
+    end
   end
+
+
 #AT+CIPSTART="UDP","20.20.20.21",8099
   def cb_aplist #we have completed an command and got this as reply:
     @c_reply.each do |ap|
@@ -207,6 +225,15 @@ class Esp8266
     #pp @ap_list
   end
 
+  def cb_join?
+    puts "JOINED OK! -- let's check connection!"
+  end
+
+  def err_join?
+    puts "NOT JOINED! -- let's join!"
+    sq << {cmd: :join, args:"\"HALLI\",\"\""}
+    sq << {cmd: :join?}
+  end
 
   def parse_reply s
     now=stamp
@@ -227,7 +254,13 @@ class Esp8266
         end
         newc_state :idle
       elsif s==@c_error
-        puts ">Error detected! #{@c_last}, took  #{now-@c_state_s}ms , tout #{@c_tout}ms".colorize(:red)
+        cb="err_#{@c_last[:cmd]}".to_sym
+        puts ">Error detected! #{@c_last}, took  #{now-@c_state_s}ms , tout #{@c_tout}ms cb:#{cb}".colorize(:red)
+        begin
+          send cb
+        rescue =>e
+          #puts "cb fail #{e}"
+        end
         newc_state=:idle
       else #its data, collect it!
         @c_reply << s
@@ -254,7 +287,7 @@ class Esp8266
 
     @ap_list=[]
     @sq=Queue.new
-    @sq << {cmd: :reboot}
+    #@sq << {cmd: :reboot}
     @sq << {cmd: :init}
     @sq << {cmd: :ping}
     @sq << {cmd: :cwmode, args:"#{MODE}"}
@@ -356,6 +389,9 @@ class Esp8266
               else
                 print ch.chr.colorize(:red)
               end
+              if @lbuf=="> " and @c_last[:cmd]==:send
+                @port.write "#{@sendbuf}\n"
+              end
             end
           rescue => e
             puts "Error: In task fails: #{e} #{act}"
@@ -374,14 +410,12 @@ class Esp8266
 
 end
 
-
-
 $stdout.sync = true
 options={dev: "/dev/ttyAMA0", debug: true}
 $dev=Esp8266.new options
 
 port=$dev.get_port
-
+#:join "winttitonttu",""
 loop  do
   if $stdin.ready?
     c = $stdin.gets.chop
@@ -392,7 +426,7 @@ loop  do
     elsif c[/^\:(.+)$/]
       $dev.sq << {cmd: $1.to_sym, args: $2}
     else
-      $dev.sq << {cmd: :send, str:c}
+      $dev.sq << {cmd: :raw, str:c}
     end
   else
     sleep 0.01
