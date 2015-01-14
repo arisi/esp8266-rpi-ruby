@@ -52,7 +52,7 @@ class Esp8266
     if @state==n
       puts "Warning: Re-enter #{n}"
     end
-    puts "Debug: From '#{@state}' To '#{n}' after #{now-(@state_s||stamp)}ms".colorize(:yellow)
+    #puts "Debug: From '#{@state}' To '#{n}' after #{now-(@state_s||stamp)}ms".colorize(:yellow)
     @state=n
     @state_s=now
   end
@@ -77,7 +77,7 @@ class Esp8266
           if @@Commands[act[:cmd]][:args]
             str+=act[:args]
           end
-          @port.write "#{str}\r\n"
+
         end
         if act[:cmd]==:baud
           @port.baud=act[:args].to_i
@@ -93,6 +93,7 @@ class Esp8266
         @c_ok=@@Commands[act[:cmd]][:ok]||"OK"
         @c_error=@@Commands[act[:cmd]][:error]||"ERROR"
         puts "cmd #{act} -> <#{str}>  ok: #{@c_ok} tout:#{@c_tout}".colorize(:blue).bold
+        @port.write "#{str}\r\n" if str!=""
       else
         puts "Error: Unsupported command: #{act}"
       end
@@ -108,7 +109,7 @@ class Esp8266
     if @c_state==n
       puts "Warning: Re-enter c_state #{n}"
     end
-    puts "Debug: C From '#{@c_state}' To '#{n}' after #{now-(@c_state_s||stamp)}ms".colorize(:yellow)
+    #puts "Debug: C From '#{@c_state}' To '#{n}' after #{now-(@c_state_s||stamp)}ms".colorize(:yellow)
     @c_state=n
     @c_state_s=now
     @c_reply=[]
@@ -142,7 +143,6 @@ MUX=0
 
   def cb_cips
     if @c_reply[0][/STATUS:(\d+)/]
-      puts "cippi: #{@c_reply} ->#{$1}"
       case $1.to_i
       when 2
         @cipstatus=:got_ip
@@ -156,7 +156,7 @@ MUX=0
         @cipstatus=nil
       end
       @cipstatus_s=stamp
-      puts "cippi: #{@c_reply} ->#{$1} ->#{@cipstatus}"
+      puts "cipstatus: '#{@cipstatus}'"
     else
       puts "cippi: #{@c_reply} ???"
     end
