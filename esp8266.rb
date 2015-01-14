@@ -21,11 +21,13 @@ end
 
 class Esp8266
   attr_accessor :sq,:c_state
+  Holdoff=0.3
 
   @@Commands={
-    reboot:  {ok: "ready", tout:4000},
+    reboot:  {ok: "ready", tout:4000,holdoff:4},
+    init:    {holdoff:2},
     ping:    {at: "", tout:200, period: 120, retries:4},
-    reset:   {at: "+RST", ok: "ready", tout:4000, hold: 1, next_state: :booted},
+    reset:   {at: "+RST", ok: "ready", tout:4000, hold: 1,holdoff:5},
     cwmode?: {at: "+CWMODE?", tout:500, period: :once},
     cwmode:  {at: "+CWMODE=", args:1, tout:500},
     cipmux?: {at: "+CIPMUX?", tout:500, period: :once},
@@ -57,14 +59,18 @@ class Esp8266
 
   def cmd act
     begin
+      @holdoff=(@@Commands[act[:cmd]][:holdoff]||Holdoff)*1000.0
+      puts "act:#{act} --> #{@holdoff}"
       if act[:cmd]==:send #for raw send , debug console etc.
         puts "Debug: sent '#{act[:str]}'".colorize(:yellow)
         @port.write "#{act[:str]}\r\n"
       elsif act[:cmd]==:init
-        puts "Debug: Init".colorize(:yellow)
+        puts "\nDebug: Init --------------------------------------------".colorize(:blue)
         newc_state :idle
         @port.write "\r\n" #flush any crap on serial line
+        @c_stamps[act[:cmd]]=stamp+10000.0
       elsif @@Commands[act[:cmd]]
+        newc_state :incmd
         str=""
         if @@Commands[act[:cmd]][:at]
           str="AT#{@@Commands[act[:cmd]][:at]}"
@@ -74,12 +80,11 @@ class Esp8266
           @port.write "#{str}\r\n"
         end
         if act[:cmd]==:baud
-          @port.baud act[:args].to_i
+          @port.baud=act[:args].to_i
         end
         if act[:cmd]==:reboot
           reboot
         end
-        newc_state :incmd
         @c_stamps[act[:cmd]]=stamp
         @c_last=act
         @c_at=str
@@ -207,7 +212,7 @@ MUX=0
   end
 
   def reboot
-    puts "Debug: Hard Rebooting ".colorize(:yellow)
+    puts "Debug: Hard Rebooting ".colorize(:red).bold
     @reset.off
     sleep 0.1
     @reset.on
@@ -217,18 +222,19 @@ MUX=0
 
     @debug=hash[:debug]
     newstate :idle
-
     @c_last=nil
     @c_state=:idle
     @c_state_s=stamp
     @c_stamps={}
+    @holdoff=Holdoff
 
     @ap_list={}
     @sq=Queue.new
-    #@sq << {cmd: :reboot}
+    @sq << {cmd: :reboot}
     @sq << {cmd: :init}
     @sq << {cmd: :ping}
-    @sq << {cmd: :baud, args: "9600"}
+    #@sq << {cmd: :baud, args: "9600"}
+    @sq << {cmd: :ping}
     @sq << {cmd: :ping}
     @sq << {cmd: :cwsap, args: "\"TIKKU\",\"\",3,"}
     #@sq << {cmd: :ping}
@@ -250,7 +256,7 @@ MUX=0
       return nil
     end
     begin
-      @port = SerialPort.new hash[:dev],9600,8,1,SerialPort::NONE
+      @port = SerialPort.new hash[:dev],115200,8,1,SerialPort::NONE
       #$sp.read_timeout = 100
       @port.flow_control= SerialPort::NONE
       @port.binmode
@@ -266,7 +272,7 @@ MUX=0
       loop do
         now=stamp
         if @c_state==:idle
-          if now-@c_state_s>200 #holdoff
+          if now-@c_state_s>@holdoff #holdoff
             if not @sq.empty?
               act=@sq.pop
               #print "::#{act}\r\n"
@@ -307,7 +313,7 @@ MUX=0
 
     @taski_in=Thread.new do
       loop do
-        if @port.ready_for_read?
+        while @port.ready_for_read?
           begin
             ch = @port.readbyte
             if ch.chr=="\r"
@@ -332,9 +338,8 @@ MUX=0
             pp e.backtrace
             return nil
           end
-        else
-          sleep 0.001
         end
+        sleep 0.001
       end
     end
   end
