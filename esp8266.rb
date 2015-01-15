@@ -64,8 +64,8 @@ def initialize(hash={})
 
     @out_q=Queue.new
     @in_q=Queue.new
-    @out_q << {ip: "20.20.20.21",port:8099,proto:"UDP",data: "kuukkuu"}
-    @out_q << {ip: "20.20.20.21",port:8099,proto:"UDP",data: "kuukkuu2"}
+    @out_q << {ip: "20.20.20.21",port:8099,proto:"UDP",data: "kuukkuu\n"}
+    @out_q << {ip: "20.20.20.21",port:8099,proto:"UDP",data: "kuukkuu2\n"}
 
     @sq=Queue.new
     #@sq << {cmd: :reboot}
@@ -108,6 +108,32 @@ def initialize(hash={})
     end
     @dev=hash[:dev]
     puts "Open Serial OK!" if @debug
+    @taski_data=Thread.new do
+      loop do
+        now=stamp
+        if @cipstatus==:got_ip #connected
+          if not @out_q.empty?
+            data=@out_q.pop
+            i = find_client data
+            if not i
+              for n in 1..10
+                if not @clients[n]
+                  i=n
+                  break
+                end
+              end
+              if i
+                sq << {cmd: :connect, args:"#{i},\"#{data[:proto]}\",\"#{data[:ip]}\",#{data[:port]}"}
+              else
+                puts "Error: Dropped outpacket as no open handles"
+              end
+            end
+            sq << {cmd: :send, args:"#{i},#{data[:data].length}", data: data[:data]}
+          end
+        end
+        sleep 1
+      end
+    end
     @taski_poll=Thread.new do
       loop do
         now=stamp
@@ -190,6 +216,15 @@ def initialize(hash={})
     (Time.now.to_f*1000).to_i #ms counter
   end
 
+  def find_client obj
+    @clients.each_with_index do |c,i|
+      if c[:ip]==obj[:ip] and c[:port]==obj[:port] and c[:proto]==obj[:proto]
+        return i
+      end
+    end
+    return nil
+  end
+
   def newstate n
     now=stamp
     if @state==n
@@ -227,12 +262,11 @@ def initialize(hash={})
           str="AT#{@@Commands[act[:cmd]][:at]}"
           if @@Commands[act[:cmd]][:args]
             if @@Commands[act[:cmd]][:has_data]
-              act[:args]+="\n" #nice on nc
-              len=act[:args].length
-              str+="1,#{len}"
-              @sendbuf=act[:args]
+              @sendbuf=act[:data]
             else
-              str+=act[:args]
+              @sendbuf=""
+            end
+            str+=act[:args]
             end
           end
 
@@ -346,13 +380,6 @@ def initialize(hash={})
           end
         end
         pp @clients
-      end
-      if @clients==[]
-        puts "NO CONNECTIONS -- LET'S CONNECT!"
-        sq << {cmd: :connect, args:"1,\"UDP\",\"20.20.20.21\",8099"}
-        sq << {cmd: :connect, args:"2,\"UDP\",\"20.20.20.21\",8098"}
-        sq << {cmd: :cips}
-        #sq << {cmd: :server, args: "1,9999"}
       end
     rescue => e
       puts "Error: cb_cips fails: #{e} "
